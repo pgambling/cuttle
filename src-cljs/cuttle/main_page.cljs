@@ -36,10 +36,6 @@
 ;; TODO: move [:projects :order] to :projects-order
 (def initial-app-state {
   :add-project-modal-showing? false
-  :desktop-notification-on-errors? true
-  :desktop-notification-on-warnings? true
-  :dock-bounce-on-errors? true
-  :dock-bounce-on-warnings? true
   :new-project-dir homedir
   :new-project-error nil
   :new-project-name ""
@@ -49,6 +45,12 @@
   :projects {:order []}
   :settings-modal-showing? false
   :version-tooltip-showing? false
+  :settings {
+    :desktop-notification-on-errors? true
+    :desktop-notification-on-warnings? true
+    :dock-bounce-on-errors? true
+    :dock-bounce-on-warnings? true
+  }
   })
 
 (def state (atom initial-app-state))
@@ -103,7 +105,6 @@
 (def initial-project-build-state
   "Initial state for a new build in a project"
   {;; tool state
-   :active? true
    :compile-time 0
    :last-compile-time nil
    :error nil
@@ -119,7 +120,6 @@
   "Initial state for a new project"
   {;; tool state
    :compile-menu-showing? false
-   :auto-compile? true
    :state nil
 
    ;; from project.clj
@@ -134,6 +134,15 @@
    ;; (see initial-project-build-state)
    :builds {}
    :builds-order []})
+
+(def initial-project-settings
+  "Initial state of user settings for a project"
+  {:auto-compile? true
+   :builds {}})
+
+(def initial-project-build-settings
+  "Initial state of user settings for a new build in a project"
+  {:active? true})
 
 ;;------------------------------------------------------------------------------
 ;; Project State Creators
@@ -185,7 +194,21 @@
 
 (defn- finish-project-load!
   [filename]
-  (swap! state assoc-in [:projects filename :state] :idle))
+  ;; initialize the project settings to default values if not already set
+  (let [prj-settings (get-in @state [:settings filename])
+        bld-settings (:builds prj-settings)
+        blds (get-in @state [:projects filename :builds])
+        bld-ids (keys blds)
+        bld-settings
+          (reduce
+            (fn [existing-bld-settings bld-id]
+              (update-in existing-bld-settings [bld-id] (partial merge initial-project-build-settings)))
+            bld-settings
+            bld-ids)
+        prj-settings (merge initial-project-settings prj-settings)
+        prj-settings (assoc prj-settings :builds bld-settings)]
+    (swap! state assoc-in [:settings filename] prj-settings)
+    (swap! state assoc-in [:projects filename :state] :idle)))
 
 (defn- add-project!
   [filename]
@@ -216,6 +239,7 @@
                      vec)
           new-state (-> @state
                         (update-in [:projects] dissoc filename)
+                        (update-in [:settings] dissoc filename)
                         (assoc-in [:projects :order] new-order))]
       (reset! state new-state))))
 
@@ -333,20 +357,13 @@
       (when-let [settings (-> (js/require settings-file)
                           js->clj
                           keywordize-keys)]
-        (swap! state merge settings)))))
-
-(def settings-keys
-  #{:dock-bounce-on-errors?
-    :dock-bounce-on-warnings?
-    :desktop-notification-on-errors?
-    :desktop-notification-on-warnings?})
+        (swap! state assoc :settings settings)))))
 
 (defn- save-settings!
   "Save settings to disk."
-  []
+  [settings]
   (let [settings-file (str app-data-path path-separator "settings.json")
-        settings (select-keys @state settings-keys)
-        settings-json (.stringify js/JSON (clj->js settings))]
+        settings-json (.stringify js/JSON (clj->js settings) nil 2)]
     (log-info "saving settings" settings-file)
     (write-file-async! settings-file settings-json)))
 
@@ -609,11 +626,11 @@
 
 (defn- toggle-auto-compile [prj-key]
   (log-info "toggling auto compile for" prj-key)
-  (swap! state update-in [:projects prj-key :auto-compile?] not))
+  (swap! state update-in [:settings prj-key :auto-compile?] not))
 
 (defn- toggle-build-active [prj-key bld-id]
   (log-info "toggling build active for" bld-id "on" prj-key)
-  (swap! state update-in [:projects prj-key :builds bld-id :active?] not))
+  (swap! state update-in [:settings prj-key :builds bld-id :active?] not))
 
 (defn- show-new-project-modal []
   (log-info "showing add project modal")
@@ -703,20 +720,16 @@
 ;; everytime they change; this is fine for now
 
 (defn- click-dock-bounce-on-errors []
-  (swap! state update-in [:dock-bounce-on-errors?] not)
-  (save-settings!))
+  (swap! state update-in [:settings :dock-bounce-on-errors?] not))
 
 (defn- click-dock-bounce-on-warnings []
-  (swap! state update-in [:dock-bounce-on-warnings?] not)
-  (save-settings!))
+  (swap! state update-in [:settings :dock-bounce-on-warnings?] not))
 
 (defn- click-desktop-notification-on-errors []
-  (swap! state update-in [:desktop-notification-on-errors?] not)
-  (save-settings!))
+  (swap! state update-in [:settings :desktop-notification-on-errors?] not))
 
 (defn- click-desktop-notification-on-warnings []
-  (swap! state update-in [:desktop-notification-on-warnings?] not)
-  (save-settings!))
+  (swap! state update-in [:settings :desktop-notification-on-warnings?] not))
 
 (defn- on-mouse-enter-tooltip []
   (swap! state assoc :version-tooltip-showing? true))
@@ -818,21 +831,22 @@
     (if-not active?
       " not-active-a8d35")))
 
-(sablono/defhtml build-option [bld prj-key]
-  [:div.bld-e7c4d
-    {:on-click #(toggle-build-active prj-key (:id bld))}
-    (if (:active? bld)
-      [:i.fa.fa-check-square-o]
-      [:i.fa.fa-square-o])
-    (-> bld :id name)])
+(sablono/defhtml build-option [bld prj-key prj-settings]
+  (let [bld-id (:id bld)]
+    [:div.bld-e7c4d
+      {:on-click #(toggle-build-active prj-key bld-id)}
+      (if (get-in prj-settings [:builds bld-id :active?])
+        [:i.fa.fa-check-square-o]
+        [:i.fa.fa-square-o])
+      (-> bld :id name)]))
 
-(sablono/defhtml compile-menu [prj-key prj]
+(sablono/defhtml compile-menu [prj-key prj prj-settings]
   [:div.menu-b4b27
     {:on-click #(.stopPropagation %)}
     [:label.small-cffc5 "options"]
     [:label.label-ec878
       {:on-click #(toggle-auto-compile prj-key)}
-      (if (:auto-compile? prj)
+      (if (:auto-compile? prj-settings)
         [:i.fa.fa-check-square-o]
         [:i.fa.fa-square-o])
       "Auto Compile"]
@@ -841,13 +855,13 @@
     (map
       (fn [bld-id]
         (let [bld (get-in prj [:builds bld-id])]
-          (build-option bld prj-key)))
+          (build-option bld prj-key prj-settings)))
       (:builds-order prj))])
 
-(sablono/defhtml idle-state [prj-key prj]
+(sablono/defhtml idle-state [prj-key prj prj-settings]
   [:button.compile-btn-17a78
     {:on-click #(click-compile-btn prj-key)}
-    (if (:auto-compile? prj)
+    (if (:auto-compile? prj-settings)
       "Auto Compile"
       "Compile Once")
     [:span.count-cfa27 (str "[" (num-selected-builds prj) "]")]]
@@ -855,7 +869,7 @@
     {:on-click #(click-compile-options % prj-key)}
     [:i.fa.fa-caret-down]]
   (when (:compile-menu-showing? prj)
-    (compile-menu prj-key prj)))
+    (compile-menu prj-key prj prj-settings)))
 
 (sablono/defhtml auto-state [prj-key]
   [:span.status-984ee "Auto compiling..."]
@@ -970,9 +984,10 @@
                  (not (zero? (:warnings bld))))
         (map warning-row (:warnings bld)))]))
 
-(quiescent/defcomponent Project [prj]
+(quiescent/defcomponent Project [[prj settings]]
   (let [prj-key (:filename prj)
-        prj-name (:name prj)]
+        prj-name (:name prj)
+        prj-settings (get settings prj-key)]
     (sablono/html
       [:div.project-1b83a
         [:div.wrapper-714e4
@@ -998,7 +1013,7 @@
                 :loading nil
                 :auto (auto-state prj-key)
                 :cleaning (cleaning-state prj-key)
-                :idle (idle-state prj-key prj)
+                :idle (idle-state prj-key prj prj-settings)
                 :once (once-state prj-key)
                 "*unknown project state*")])]
         [:table.tbl-bdf39
@@ -1033,33 +1048,33 @@
       3 (creating-new-project modal-state)
       nil)))
 
-(quiescent/defcomponent SettingsModal [app-state]
+(quiescent/defcomponent SettingsModal [settings]
   (sablono/html
     [:div.modal-body-8c212
       [:h4.modal-title-8e35b "Settings"]
       (when on-mac? (list
         [:label.settings-label-7daea
           {:on-click click-dock-bounce-on-errors}
-          (if (:dock-bounce-on-errors? app-state)
+          (if (:dock-bounce-on-errors? settings)
             [:i.fa.fa-check-square-o]
             [:i.fa.fa-square-o])
           "Dock bounce on errors."]
         [:label.settings-label-7daea
           {:on-click click-dock-bounce-on-warnings}
-          (if (:dock-bounce-on-warnings? app-state)
+          (if (:dock-bounce-on-warnings? settings)
             [:i.fa.fa-check-square-o]
             [:i.fa.fa-square-o])
           "Dock bounce on warnings."]
         [:div.spacer-586a6]))
       [:label.settings-label-7daea
         {:on-click click-desktop-notification-on-errors}
-        (if (:desktop-notification-on-errors? app-state)
+        (if (:desktop-notification-on-errors? settings)
           [:i.fa.fa-check-square-o]
           [:i.fa.fa-square-o])
         "Desktop notifications on errors."]
       [:label.settings-label-7daea
         {:on-click click-desktop-notification-on-warnings}
-        (if (:desktop-notification-on-warnings? app-state)
+        (if (:desktop-notification-on-warnings? settings)
           [:i.fa.fa-check-square-o]
           [:i.fa.fa-square-o])
         "Desktop notifications on warnings."]]))
@@ -1102,30 +1117,24 @@
     :new-project-name
     :new-project-step })
 
-(def settings-modal-keys
-  "All the keys we need in order to build the Settings modal."
-  #{:dock-bounce-on-errors?
-    :dock-bounce-on-warnings?
-    :desktop-notification-on-errors?
-    :desktop-notification-on-warnings? })
-
 (quiescent/defcomponent AppRoot [app-state]
-  (sablono/html
-    [:div
-      (when (:add-project-modal-showing? app-state)
-        (list (modal-overlay click-add-project-modal-overlay)
-              (AddProjectModal (select-keys app-state add-project-modal-keys))))
-      (when (:settings-modal-showing? app-state)
-        (list (modal-overlay click-settings-modal-overlay)
-              (SettingsModal (select-keys app-state settings-modal-keys))))
-      (when (:new-version-bar-showing? app-state)
-        (new-version-bar (:new-version-num app-state)))
-      [:div.app-ca3cd {:on-click click-root}
-        (Header (:version-tooltip-showing? app-state))
-        (let [projects (-> app-state :projects get-ordered-projects)]
+  (let [projects (-> app-state :projects get-ordered-projects)
+        settings (:settings app-state)]
+    (sablono/html
+      [:div
+        (when (:add-project-modal-showing? app-state)
+          (list (modal-overlay click-add-project-modal-overlay)
+                (AddProjectModal (select-keys app-state add-project-modal-keys))))
+        (when (:settings-modal-showing? app-state)
+          (list (modal-overlay click-settings-modal-overlay)
+                (SettingsModal settings)))
+        (when (:new-version-bar-showing? app-state)
+          (new-version-bar (:new-version-num app-state)))
+        [:div.app-ca3cd {:on-click click-root}
+          (Header (:version-tooltip-showing? app-state))
           (if (zero? (count projects))
             (no-projects)
-            (map Project projects)))]]))
+            (map #(Project [% settings]) projects))]])))
 
 ;;------------------------------------------------------------------------------
 ;; State Change and Rendering
@@ -1135,16 +1144,23 @@
 (def cancel-anim-frame (aget js/window "cancelAnimationFrame"))
 (def anim-frame-id nil)
 
-(defn- on-change-state [_kwd _the-atom _old-state new-state]
-  ;; cancel any previous render functions if they happen before the next
-  ;; animation frame
-  (when anim-frame-id
-    (cancel-anim-frame anim-frame-id)
-    (set! anim-frame-id nil))
+(defn- on-change-state [_kwd _the-atom old-state new-state]
+  (let [old-settings (:settings old-state)
+        new-settings (:settings new-state)]
 
-  ;; put the render function on the next animation frame
-  (let [render-fn #(quiescent/render (AppRoot new-state) (by-id "mainPage"))]
-    (set! anim-frame-id (request-anim-frame render-fn))))
+    ;; write settings to disk if updated
+    (when (not= old-settings new-settings)
+     (save-settings! new-settings))
+
+    ;; cancel any previous render functions if they happen before the next
+    ;; animation frame
+    (when anim-frame-id
+      (cancel-anim-frame anim-frame-id)
+      (set! anim-frame-id nil))
+
+    ;; put the render function on the next animation frame
+    (let [render-fn #(quiescent/render (AppRoot new-state) (by-id "mainPage"))]
+      (set! anim-frame-id (request-anim-frame render-fn)))))
 
 (add-watch state :main on-change-state)
 
@@ -1184,8 +1200,8 @@
 (defn init! [proj-filenames]
   (log-info "initializing main page")
   (add-events!)
-  (load-settings-file!)
   (init-projects! proj-filenames)
+  (load-settings-file!)
   (show-main-page!)
 
   ;; trigger initial UI render even if proj-filenames is empty
